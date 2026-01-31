@@ -1,18 +1,43 @@
-# Decision Log
-
-## 2026-01-xx
-- docs フォルダを作成
-- Claude Code を前提に、設計・判断ログを残す方針にした
-- UI / 設計ルールは別ファイルで管理する
 # Decision Log (E-STEP-TOOL)
 
-## 2026-01-31
-### docs/ を作成
-- Decision: docs/decision-log.md と docs/design-rules.md を導入
-- Why: AI（Claude Code/OpenCode）に“設計の前提”を共有し、修正ブレを減らす
-- Scope: 全機能（UI/設計/実装ルールの参照元）
+This file records **binding architectural and operational decisions**.
+All AI systems and contributors must respect these decisions.
 
-### Git運用
-- Decision: docs/ だけを先に commit（app 側は別 commit）
-- Why: 変更範囲を小さく保ち、差分レビューとロールバックを容易にする
-- Scope: リポジトリ運用
+---
+
+## 2026-01-31: Introduce docs/ as authoritative design memory
+
+### Context
+- Claude Code / OpenCode / ChatGPT 等の AI を併用する中で、
+  設計判断・前提条件がセッションごとにブレる問題が顕在化した。
+- チャットベースの指示だけでは、長期的な判断軸を維持できない。
+
+### Decision
+- `docs/` フォルダを **AI・人間共通の契約書置き場**として扱う。
+- 以下を最優先ドキュメントとする：
+  - `docs/ai-principles.md`
+  - `docs/design-rules.md`
+  - `docs/decision-log.md`
+
+### Consequences
+- docs に書かれていないルールは「未決定」扱い。
+- AI 提案は docs に反する場合、必ず停止して指摘する。
+- 重要な判断は必ず decision-log に記録する。
+
+### Status
+- Accepted
+
+---
+
+## 2026-01-31: Standardize API response shape
+
+### Context
+- API ごとにレスポンス形式が揺れ、UI 側の分岐・事故リスクが増えていた。
+- AI 実装提案時にも前提が揃わず、精度が落ちていた。
+
+### Decision
+- 全ての Route Handler は以下の形式に統一する。
+
+Success:
+```ts
+{ ok: true, data: T }
