@@ -17,3 +17,35 @@ You MUST read and follow:
 4) Decision-log entry draft (if any rule/exception is needed)
 git add CLAUDE.md
 git commit -m "docs: enforce docs priority in CLAUDE.md"
+---
+## Docs Priority (Must Read First)
+
+You MUST read and follow, in this order:
+1) docs/ai-principles.md
+2) docs/design-rules.md
+3) docs/decision-log.md
+git add CLAUDE.md
+git commit -m "docs: enforce docs priority in CLAUDE.md"
+---
+## Docs Priority (Must Read First)
+
+You MUST read and follow, in this order:
+1) docs/ai-principles.md
+2) docs/design-rules.md
+3) docs/decision-log.md
+## ✅ AI Contract (Must Read First)
+
+AI MUST read and follow, in this order:
+1. docs/ai-principles.md
+2. docs/design-rules.md
+3. docs/decision-log.md
+
+If any conflict exists, the higher priority document always wins.
+## ✅ AI Contract (Must Read First)
+
+AI MUST read and follow, in this order:
+1. docs/ai-principles.md
+2. docs/design-rules.md
+3. docs/decision-log.md
+
+If any conflict exists, the higher priority document always wins.
