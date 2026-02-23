@@ -108,3 +108,20 @@ export function calcPayroll(
 
 // page.tsx が PremiumTable を import しているので再export
 export type { PremiumTable } from "./types";
+
+/**
+ * 雇用保険料の自動計算
+ * - isInsured = false（役員など）なら 0
+ * - 対象なら grossTaxableYen × rate を四捨五入
+ */
+export function calcEmploymentInsuranceYen(
+  grossTaxableYen: number,
+  rate: number,
+  isInsured: boolean
+): number {
+  if (!isInsured) return 0;
+  if (!Number.isFinite(grossTaxableYen) || grossTaxableYen <= 0) return 0;
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+
+  return Math.round(grossTaxableYen * rate);
+}

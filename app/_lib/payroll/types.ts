@@ -76,3 +76,24 @@ export type PayrollResult = {
   };
   warnings: string[];
 };
+
+// ✅ 従業員型（税計算用フィールド含む）
+export type Employee = {
+  id: string;
+  name: string;
+  employment_type: EmploymentType;
+  base_salary_yen: number;
+  daily_wage_yen: number;
+  hourly_rate_yen: number | null;
+  fixed_ot_allowance_yen: number;
+  fixed_ot_hours: number;
+  effective_from: string;
+  is_active: boolean;
+
+  // 税計算用
+  dependents_count: number;              // 扶養人数
+  is_employment_insured: boolean;        // 雇用保険 対象/非対象（役員false）
+  withholding_pay_type?: "ko" | "otsu"; // 将来用（今は ko 固定でOK）
+  is_executive: boolean;                 // 役員フラグ
+  employment_insurance_rate: number | null; // 個別料率（null=デフォルト）
+};

@@ -29,6 +29,33 @@ All AI systems and contributors must respect these decisions.
 
 ---
 
+## 2026-02-21: Replace manualAllowance with row-based AllowanceRow editor
+
+### Context
+- 給与計算ページの手当入力が「手当（手入力合計）」という1つの金額フィールドしかなく、
+  定額残業費・住宅手当・技能手当などの個別項目管理ができなかった。
+- 控除側は既に行ベースエディタ（DeductionRowsEditor）で管理できている。
+- 課税/非課税の区分が必要（通勤手当等は非課税として所得税計算から除外する必要）。
+
+### Decision
+- `manualAllowance: number` を `allowanceRows: AllowanceRow[]` に置き換える。
+- AllowanceRow に `isTaxable: boolean` を持たせ、課税/非課税を行ごとに制御する。
+- デフォルト7行：定額残業費, 特別手当, 住宅手当, 技能手当, 皆勤手当, 欠勤控除, 休業手当。
+- localStorage 永続化は deduction_rows と同じパターン（月次キー + recurring 引き継ぎ）。
+- `payroll_runs` テーブルに `allowance_rows` JSONB カラムを追加（カラム無し時は fallback）。
+- `taxableForIncomeTaxYen` は `grossWithTemplates - nonTaxableTotal - socialInsurance` に変更。
+- Excel出力: テンプレ行17-22 に手当項目をマッピング。
+
+### Consequences
+- `result.allowances.manualYen` は `allowanceRowsTotal` を保存（後方互換）。
+- 旧データの `manualYen` はそのまま読み取り可能（Excel出力に影響なし）。
+- DB に `allowance_rows` カラムが無い環境では graceful fallback（カラム除外してリトライ）。
+
+### Status
+- Accepted
+
+---
+
 ## 2026-01-31: Standardize API response shape
 
 ### Context

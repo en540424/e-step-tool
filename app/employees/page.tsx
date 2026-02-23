@@ -19,6 +19,13 @@ type EmployeeRow = {
   is_active: boolean;
   created_at?: string;
   updated_at?: string;
+
+  // ✅ 所得税計算用
+  dependents_count: number;
+  withholding_type: "KO" | "OTSU";
+  is_executive: boolean;
+  is_employment_insurance_applicable: boolean;
+  employment_insurance_rate: number | null; // 個別設定（null = work_rules のデフォルト）
 };
 
 function toNum(v: string, fallback = 0) {
@@ -59,6 +66,12 @@ export default function EmployeesPage() {
     fixed_ot_hours: "0",
     effective_from: todayYYYYMMDD(),
     is_active: true,
+    // ✅ 所得税計算用
+    dependents_count: "0",
+    withholding_type: "KO" as "KO" | "OTSU",
+    is_executive: false,
+    is_employment_insurance_applicable: true,
+    employment_insurance_rate: "", // 空=デフォルト使用
   });
 
   const [message, setMessage] = useState<string | null>(null);
@@ -87,7 +100,7 @@ export default function EmployeesPage() {
     const q = sb
       .from("employees")
       .select(
-        "id,code,name,employment_type,base_salary_yen,daily_wage_yen,hourly_rate_yen,fixed_ot_allowance_yen,fixed_ot_hours,effective_from,is_active,created_at,updated_at"
+        "id,code,name,employment_type,base_salary_yen,daily_wage_yen,hourly_rate_yen,fixed_ot_allowance_yen,fixed_ot_hours,effective_from,is_active,created_at,updated_at,dependents_count,withholding_type,is_executive,is_employment_insurance_applicable,employment_insurance_rate"
       )
       .order("name");
 
@@ -139,6 +152,12 @@ export default function EmployeesPage() {
       fixed_ot_hours: String(selected.fixed_ot_hours ?? 0),
       effective_from: selected.effective_from ?? todayYYYYMMDD(),
       is_active: Boolean(selected.is_active),
+      // ✅ 所得税計算用
+      dependents_count: String(selected.dependents_count ?? 0),
+      withholding_type: (selected.withholding_type ?? "KO") as "KO" | "OTSU",
+      is_executive: Boolean(selected.is_executive),
+      is_employment_insurance_applicable: selected.is_employment_insurance_applicable !== false,
+      employment_insurance_rate: selected.employment_insurance_rate == null ? "" : String(selected.employment_insurance_rate),
     });
 
     setWarn(null);
@@ -170,6 +189,12 @@ export default function EmployeesPage() {
       fixed_ot_hours: "0",
       effective_from: todayYYYYMMDD(),
       is_active: true,
+      // ✅ 所得税計算用
+      dependents_count: "0",
+      withholding_type: "KO",
+      is_executive: false,
+      is_employment_insurance_applicable: true,
+      employment_insurance_rate: "",
     });
     setWarn(null);
     flash("新規作成モード");
@@ -199,6 +224,12 @@ export default function EmployeesPage() {
       fixed_ot_hours: Number(form.fixed_ot_hours || 0),
       effective_from: form.effective_from || todayYYYYMMDD(),
       is_active: Boolean(form.is_active),
+      // ✅ 所得税計算用
+      dependents_count: toNum(form.dependents_count, 0),
+      withholding_type: form.withholding_type,
+      is_executive: Boolean(form.is_executive),
+      is_employment_insurance_applicable: Boolean(form.is_employment_insurance_applicable),
+      employment_insurance_rate: form.employment_insurance_rate.trim() ? Number(form.employment_insurance_rate) : null,
     };
 
     const { data, error } = await sb
@@ -330,7 +361,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}
               <div style={warnBox}>{warn}</div>
             )}
 
-            <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr" }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               <label style={labelWrap}>
                 <span style={labelText}>社員コード（任意）</span>
                 <input
@@ -381,7 +412,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}
 
             <h2 style={h2}>基本給・単価</h2>
 
-            <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr" }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               <label style={labelWrap}>
                 <span style={labelText}>月給（円）</span>
                 <input
@@ -423,7 +454,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}
 
             <h2 style={h2}>固定残業（通知書の内容）</h2>
 
-            <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr" }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               <label style={labelWrap}>
                 <span style={labelText}>固定残業代（円）</span>
                 <input
@@ -442,6 +473,74 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}
                   onChange={(e) => setForm((p) => ({ ...p, fixed_ot_hours: e.target.value }))}
                   style={input}
                 />
+              </label>
+            </div>
+
+            <hr style={{ margin: "14px 0", border: "none", borderTop: "1px solid #eee" }} />
+
+            <h2 style={h2}>所得税計算用</h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              <label style={labelWrap}>
+                <span style={labelText}>扶養親族数</span>
+                <input
+                  inputMode="numeric"
+                  value={form.dependents_count}
+                  onChange={(e) => setForm((p) => ({ ...p, dependents_count: e.target.value }))}
+                  style={input}
+                  placeholder="0"
+                />
+                <div style={help}>源泉徴収税額表の参照に使用（0〜7）</div>
+              </label>
+
+              <label style={labelWrap}>
+                <span style={labelText}>甲欄/乙欄</span>
+                <select
+                  value={form.withholding_type}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, withholding_type: e.target.value as "KO" | "OTSU" }))
+                  }
+                  style={input}
+                >
+                  <option value="KO">甲欄（扶養控除等申告書あり）</option>
+                  <option value="OTSU">乙欄（副業など）</option>
+                </select>
+              </label>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={form.is_executive}
+                  onChange={(e) => setForm((p) => ({ ...p, is_executive: e.target.checked }))}
+                />
+                <span style={{ fontSize: 13, fontWeight: 700 }}>役員</span>
+              </label>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={form.is_employment_insurance_applicable}
+                  onChange={(e) => setForm((p) => ({ ...p, is_employment_insurance_applicable: e.target.checked }))}
+                />
+                <span style={{ fontSize: 13, fontWeight: 700 }}>雇用保険 対象</span>
+              </label>
+            </div>
+
+            {/* 雇用保険率（個別指定） */}
+            <div style={{ marginTop: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>雇用保険率（空=デフォルト）</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="例: 0.006"
+                  value={form.employment_insurance_rate}
+                  onChange={(e) => setForm((p) => ({ ...p, employment_insurance_rate: e.target.value }))}
+                  style={{ width: 120, padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
+                />
+                <span style={{ fontSize: 11, color: "#888" }}>
+                  空欄の場合は就業規則のデフォルト値（通常 0.006）が適用されます
+                </span>
               </label>
             </div>
 
