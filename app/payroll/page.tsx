@@ -1170,7 +1170,9 @@ export default function PayrollPage() {
         holidayNonLegalHours: holidayNonLegal,
       },
       allowances: {
-        manual: allowanceRowsTotal,
+        // ✅ 0 固定: allowanceRowsTotal はエンジン外で grossWithTemplates に加算する
+        // manual に渡すと grossYen と grossWithTemplates で二重計上になる
+        manual: 0,
       },
 
       // ✅ 確認用（エンジンで使わない前提）
@@ -1499,6 +1501,12 @@ export default function PayrollPage() {
       input: { ...input, manualDeduction: manualDeductionTotal },
       result: {
         ...result,
+        baseYen: basePayYenForDeduction,
+        deductionDetail: Object.fromEntries(
+          deductionRowsForCalc
+            .filter((r) => r.yen !== 0)
+            .map((r) => [r.id, r.yen])
+        ),
         grossWithTemplatesYen: grossWithTemplates,
         allowances: {
           templateTotalYen: computedAllowances.total,

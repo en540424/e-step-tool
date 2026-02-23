@@ -250,6 +250,16 @@ function safeSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: any
   cell.value = value;
 }
 
+/** 数式を上書きして値を強制書き込み（所得税・住民税など確定値を持つセル用） */
+function forceSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: any) {
+  let cell = ws.getCell(row, col);
+  if (cell.isMerged) {
+    const master = (cell as any).master as ExcelJS.Cell | undefined;
+    if (master) cell = master;
+  }
+  cell.value = value; // 数式があっても上書き
+}
+
 /** アドレス文字列版（ヘッダ用）— merged child なら master に寄せる */
 function safeSetByAddress(ws: ExcelJS.Worksheet, addr: string, value: any) {
   let cell = ws.getCell(addr);
@@ -267,7 +277,17 @@ function safeSetByAddress(ws: ExcelJS.Worksheet, addr: string, value: any) {
   cell.value = value;
 }
 
-/** 7行目のヘッダから月の先頭列を動的に取得 */
+/** merged cell も含めてヘッダテキストを取得（master の値を読む） */
+function getHeaderText(ws: ExcelJS.Worksheet, row: number, col: number): string {
+  let cell = ws.getCell(row, col);
+  if (cell.isMerged) {
+    const master = (cell as any).master as ExcelJS.Cell | undefined;
+    if (master) cell = master;
+  }
+  return getCellText(cell.value).replace(/\s/g, "");
+}
+
+/** 7行目のヘッダから月の先頭列を動的に取得（merged cell 対応版） */
 function buildPeriodStarts(ws: ExcelJS.Worksheet, headerRow = 7) {
   const targets = new Set([
     "1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月",
@@ -275,19 +295,19 @@ function buildPeriodStarts(ws: ExcelJS.Worksheet, headerRow = 7) {
   ]);
 
   const starts: Record<string, number> = {};
-  let prev = "";
-
   const maxCol = Math.max(ws.columnCount, 80);
+
   for (let c = 1; c <= maxCol; c++) {
-    const t = getCellText(ws.getCell(headerRow, c).value).replace(/\s/g, "");
+    const t = getHeaderText(ws, headerRow, c);
     if (!targets.has(t)) continue;
 
-    // 同じ文字が連続するのは1回だけ拾う（先頭列）
-    if (t !== prev && starts[t] == null) starts[t] = c;
-    prev = t;
-  }
+    // merged cell の場合は master の列番号を月の開始列とする
+    const cell = ws.getCell(headerRow, c);
+    const master = cell.isMerged ? (cell as any).master : cell;
+    const startCol: number = master?.col ?? c;
 
-  console.log("[buildPeriodStarts] found:", starts);
+    if (starts[t] == null) starts[t] = startCol;
+  }
 
   // 12ヶ月＋賞与＋合計の順で返す
   const months = Array.from({ length: 12 }, (_, i) => `${i + 1}月`);
@@ -315,9 +335,9 @@ function writeMonthly(
   row: number,
   monthStarts: number[],
   values: (number | null)[],
-  options: { blankIfZero?: boolean } = {}
+  options: { blankIfZero?: boolean; force?: boolean } = {}
 ) {
-  const { blankIfZero = false } = options;
+  const { blankIfZero = false, force = false } = options;
   for (let i = 0; i < monthStarts.length && i < values.length; i++) {
     const col = monthStarts[i];
     if (!col) continue;
@@ -326,7 +346,8 @@ function writeMonthly(
     if (v == null) continue;
     // 0は空欄にするオプション
     if (blankIfZero && v === 0) continue;
-    safeSetCell(ws, row, col, v);
+    if (force) forceSetCell(ws, row, col, v);
+    else safeSetCell(ws, row, col, v);
   }
 }
 
@@ -357,21 +378,21 @@ const INPUT_CELLS = {
     baseSalary: 14,
     specialAllowance: 15,
     nightAllowance: 16,
-    // 手当（allowance_rows から）
-    fixedOtAllowance: 17,
-    housingAllowance: 18,
-    skillAllowance: 19,
-    attendanceAllowance: 20,
-    absenceDeduction: 21,
-    leaveAllowance: 22,
-    // 控除
+    // 控除（入力セル）
     healthIns: 26,
     unionFee: 27,
     pensionIns: 28,
     employmentIns: 29,
     incomeTax: 32,
     residentTax: 33,
-    // ※ 課税合計・総支給・差引支給は数式 → 書き込み禁止
+    // ※ 課税合計(23)・非課税合計(24)・総支給(25)・社保合計(30)・
+    //    課税対象額(31)・控除額合計(36)・差引支給(37) は数式 → 書き込み禁止
+  },
+  // ⚠ 行22 = 非課税専用行（行24 formula="I22" でダブルカウントになるため触らない）
+  allowanceArea: {
+    startRow: 17,
+    endRow: 21,   // ← 行22は非課税行のため書き込み禁止
+    labelCol: 1,
   },
 };
 
@@ -407,21 +428,52 @@ function fillLedgerTemplateOnSheet(
   writeMonthly(ws, R.specialAllowance, monthStarts, monthly.map(v => v.specialAllowance), { blankIfZero: true });
   writeMonthly(ws, R.nightAllowance, monthStarts, monthly.map(v => v.nightAllowance), { blankIfZero: true });
 
-  // 手当（allowance_rows、0なら空欄）
-  writeMonthly(ws, R.fixedOtAllowance, monthStarts, monthly.map(v => v.fixedOtAllowance), { blankIfZero: true });
-  writeMonthly(ws, R.housingAllowance, monthStarts, monthly.map(v => v.housingAllowance), { blankIfZero: true });
-  writeMonthly(ws, R.skillAllowance, monthStarts, monthly.map(v => v.skillAllowance), { blankIfZero: true });
-  writeMonthly(ws, R.attendanceAllowance, monthStarts, monthly.map(v => v.attendanceAllowance), { blankIfZero: true });
-  writeMonthly(ws, R.absenceDeduction, monthStarts, monthly.map(v => v.absenceDeduction), { blankIfZero: true });
-  writeMonthly(ws, R.leaveAllowance, monthStarts, monthly.map(v => v.leaveAllowance), { blankIfZero: true });
+  // 手当（可変）: 年間の手当ラベルを収集してテンプレ枠に流し込む
+  {
+    const { startRow, endRow, labelCol } = INPUT_CELLS.allowanceArea;
+    const maxRows = endRow - startRow + 1;
+    const labels = Array.from(
+      new Set(monthly.flatMap(m => m.allowanceItems.map(a => a.label)))
+    );
+    // overflow がある場合は最終行を合算行として予約 → named 行を maxRows-1 に制限
+    const hasOverflow = labels.length > maxRows;
+    const displayRows = hasOverflow ? maxRows - 1 : maxRows;
+    const limited = labels.slice(0, displayRows);
+    const overflow = hasOverflow ? labels.slice(displayRows) : [];
+
+    for (let i = 0; i < maxRows; i++) {
+      const r = startRow + i;
+      safeSetCell(ws, r, labelCol, null);
+      for (const col of monthStarts) { if (col) safeSetCell(ws, r, col, null); }
+    }
+
+    limited.forEach((label, i) => {
+      const r = startRow + i;
+      safeSetCell(ws, r, labelCol, label);
+      const values = monthly.map(m => m.allowanceItems.find(a => a.label === label)?.yen ?? null);
+      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true });
+    });
+
+    if (overflow.length > 0) {
+      const r = endRow;
+      safeSetCell(ws, r, labelCol, "その他（合算）");
+      const values = monthly.map(m => {
+        const sum = m.allowanceItems
+          .filter(a => overflow.includes(a.label))
+          .reduce((acc, a) => acc + a.yen, 0);
+        return sum === 0 ? null : sum;
+      });
+      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true });
+    }
+  }
 
   // 控除（0なら空欄）
   writeMonthly(ws, R.healthIns, monthStarts, monthly.map(v => v.healthIns), { blankIfZero: true });
   writeMonthly(ws, R.unionFee, monthStarts, monthly.map(v => v.unionFee), { blankIfZero: true });
   writeMonthly(ws, R.pensionIns, monthStarts, monthly.map(v => v.pensionIns), { blankIfZero: true });
   writeMonthly(ws, R.employmentIns, monthStarts, monthly.map(v => v.employmentIns), { blankIfZero: true });
-  writeMonthly(ws, R.incomeTax, monthStarts, monthly.map(v => v.incomeTax), { blankIfZero: true });
-  writeMonthly(ws, R.residentTax, monthStarts, monthly.map(v => v.residentTax), { blankIfZero: true });
+  writeMonthly(ws, R.incomeTax, monthStarts, monthly.map(v => v.incomeTax), { blankIfZero: true, force: true });
+  writeMonthly(ws, R.residentTax, monthStarts, monthly.map(v => v.residentTax), { blankIfZero: true, force: true });
 
   // 合計・差引はすべてテンプレの数式に任せる（書き込まない）
 }
@@ -574,13 +626,8 @@ type MonthData = {
   baseSalary: number | null;
   specialAllowance: number | null;
   nightAllowance: number | null;
-  // 手当（allowance_rows）
-  fixedOtAllowance: number | null;
-  housingAllowance: number | null;
-  skillAllowance: number | null;
-  attendanceAllowance: number | null;
-  absenceDeduction: number | null;
-  leaveAllowance: number | null;
+  // 可変手当
+  allowanceItems: { label: string; yen: number }[];
   // 控除
   healthIns: number | null;
   unionFee: number | null;
@@ -643,12 +690,7 @@ async function getMonthlyPayrollData(args: {
     baseSalary: null,
     specialAllowance: null,
     nightAllowance: null,
-    fixedOtAllowance: null,
-    housingAllowance: null,
-    skillAllowance: null,
-    attendanceAllowance: null,
-    absenceDeduction: null,
-    leaveAllowance: null,
+    allowanceItems: [],
     healthIns: null,
     unionFee: null,
     pensionIns: null,
@@ -690,7 +732,8 @@ async function getMonthlyPayrollData(args: {
     months[idx].holidayHours = inp.holidayHours ?? null;
     months[idx].nightHours = inp.nightHours ?? null;
 
-    // 支給（基本給は grossYen ではなく baseYen 系を優先）
+    // 支給（基本給は baseYen 系を優先）
+    // res.grossYen は allowanceRowsTotal を含む場合があるため、差し引いてフォールバック
     const baseCandidate =
       res.baseYen ??
       res.basePayYen ??
@@ -698,8 +741,11 @@ async function getMonthlyPayrollData(args: {
       res.base_pay_yen ??
       res.base?.yen ??
       res.pay?.baseYen ??
-      res.grossYen ??  // フォールバック
-      null;
+      (res.grossYen != null
+        ? res.grossYen -
+          (res.allowances?.rowsTotalYen ?? res.allowances?.manualYen ?? 0) -
+          (res.allowances?.templateTotalYen ?? 0)
+        : null);
     months[idx].baseSalary = baseCandidate;
     // 手当ヘルパー（specialAllowance でも使うので先に定義）
     const allowances = normalizeDeductions(run.allowance_rows);
@@ -718,25 +764,42 @@ async function getMonthlyPayrollData(args: {
     // 特別手当: テンプレ + AllowanceRow の合算（どちらか一方でも可）
     const templateSpecial = templateDetail["特別手当"] ?? templateDetail["固定残業代"] ?? 0;
     const rowSpecial = findAllowFb("special_allowance", "特別手当") ?? 0;
-    months[idx].specialAllowance = (templateSpecial + rowSpecial) || null;
+    // res.baseYen がある場合（新形式）は fixedIncludedYen を別行に表示する
+    // res.baseYen が無い場合（旧形式）は grossYen に fixedOT が内包されているため加算しない
+    const engineFixedOt = res.baseYen != null ? (res.overtime?.fixedIncludedYen ?? 0) : 0;
+    months[idx].specialAllowance = (templateSpecial + rowSpecial + engineFixedOt) || null;
     months[idx].nightAllowance = templateDetail["夜勤"] ?? templateDetail["夜勤手当"] ?? null;
 
-    // 手当（allowance_rows → result.allowances.rowsDetail のフォールバック）
-    months[idx].fixedOtAllowance = findAllowFb("fixed_ot_allowance", "定額残業費");
-    months[idx].housingAllowance = findAllowFb("housing_allowance", "住宅手当");
-    months[idx].skillAllowance = findAllowFb("skill_allowance", "技能手当");
-    months[idx].attendanceAllowance = findAllowFb("attendance_allowance", "皆勤手当");
-    months[idx].absenceDeduction = findAllowFb("absence_deduction", "欠勤控除");
-    months[idx].leaveAllowance = findAllowFb("leave_allowance", "休業手当");
+    // 手当（可変）: allowance_rows + rowsDetail を label→yen に統合
+    {
+      const merged: Record<string, number> = {};
+      for (const a of allowances) {
+        const label = String(a?.label ?? a?.name ?? a?.title ?? a?.id ?? "").trim();
+        const yen = Number(a?.yen ?? 0);
+        if (!label || !Number.isFinite(yen) || yen === 0) continue;
+        merged[label] = (merged[label] ?? 0) + yen;
+      }
+      for (const [label, obj] of Object.entries(rowsDetail)) {
+        const yen = Number((obj as any)?.yen ?? 0);
+        const key = String(label).trim();
+        if (!key || !Number.isFinite(yen) || yen === 0) continue;
+        if (merged[key] == null) merged[key] = yen;
+      }
+      delete merged["特別手当"];
+      delete merged["固定残業代"];
+      delete merged["夜勤"];
+      delete merged["夜勤手当"];
+      months[idx].allowanceItems = Object.entries(merged).map(([label, yen]) => ({ label, yen }));
+    }
 
     // 控除（result 優先 → deduction_rows フォールバック）
     // result は常に最新保存される。deduction_rows はカラム不在時に更新されない場合がある。
     months[idx].healthIns = findDed("health") || null;
     months[idx].unionFee = findDed("union") || null;
-    months[idx].pensionIns = findDed("pension") || null;
-    months[idx].employmentIns = res.employment_insurance?.final_yen || findDed("employment") || null;
-    months[idx].incomeTax = res.income_tax?.final_yen || findDed("income_tax") || null;
-    months[idx].residentTax = findDed("resident_tax") || null;
+    months[idx].pensionIns = findDed("pension") || res.deductionDetail?.["pension"] || null;
+    months[idx].employmentIns = res.employment_insurance?.final_yen || findDed("employment") || res.deductionDetail?.["employment"] || null;
+    months[idx].incomeTax = res.income_tax?.final_yen || findDed("income_tax") || res.deductionDetail?.["income_tax"] || null;
+    months[idx].residentTax = findDed("resident_tax") || res.deductionDetail?.["resident_tax"] || null;
 
     const incomeTaxRow = deductions.find((d: any) => d?.id === "income_tax");
     months[idx].incomeTaxSource = incomeTaxRow?.source ?? "auto";

@@ -1,5 +1,158 @@
-// scripts/auto-commit.mjs
-import { spawnSync } from "node:child_process";
+import { execSync } from "child_process";
+import OpenAI from "openai";
+
+function sh(cmd) {
+  return execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+}
+function shInherit(cmd) {
+  execSync(cmd, { stdio: "inherit" });
+}
+
+function envInt(name, fallback) {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const CFG = {
+  lang: (process.env.COMMIT_LANG || "ja").toLowerCase(), // ja | en
+  style: (process.env.COMMIT_STYLE || "conventional").toLowerCase(), // conventional
+  model: process.env.COMMIT_AI_MODEL || "gpt-4o-mini",
+
+  maxFiles: envInt("COMMIT_MAX_FILES", 50),
+  maxLines: envInt("COMMIT_MAX_LINES", 1200),
+  maxChars: envInt("COMMIT_MAX_DIFF_CHARS", 120000),
+  forceLarge: process.env.COMMIT_FORCE_LARGE === "1",
+};
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const ALLOWED_TYPES = new Set([
+  "feat",
+  "fix",
+  "refactor",
+  "perf",
+  "docs",
+  "test",
+  "build",
+  "ci",
+  "chore",
+  "style",
+]);
+
+function sanitizeOneLine(s) {
+  return String(s || "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function safeCommitMessageFromJson(j) {
+  const type = ALLOWED_TYPES.has(j.type) ? j.type : "chore";
+  const scopeRaw = sanitizeOneLine(j.scope || "");
+  const scope = scopeRaw ? `(${scopeRaw.replace(/[()]/g, "")})` : "";
+  const subject = sanitizeOneLine(j.subject || "");
+
+  // Conventional Commits: type(scope): subject
+  const header = `${type}${scope}: ${subject || "update"}`.slice(0, 72);
+
+  const body = String(j.body || "").trim();
+  const footer = String(j.footer || "").trim();
+
+  let msg = header;
+  if (body) msg += `\n\n${body}`;
+  if (footer) msg += `\n\n${footer}`;
+  return msg.trim();
+}
+
+function parseNumStat(numStatText) {
+  // lines: "12\t3\tpath"
+  let files = 0;
+  let add = 0;
+  let del = 0;
+  const lines = numStatText.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    const [a, d] = line.split("\t");
+    files += 1;
+    const ai = a === "-" ? 0 : Number(a);
+    const di = d === "-" ? 0 : Number(d);
+    if (Number.isFinite(ai)) add += ai;
+    if (Number.isFinite(di)) del += di;
+  }
+  return { files, add, del, totalLines: add + del };
+}
+
+function detectDangerousFiles(stagedNames) {
+  const danger = [];
+  const patterns = [
+    /^\.env(\..+)?$/i,
+    /\/\.env(\..+)?$/i,
+    /^\.env\.local$/i,
+    /\/\.env\.local$/i,
+    /supabase\/\.env/i,
+  ];
+  for (const n of stagedNames) {
+    if (patterns.some((p) => p.test(n))) danger.push(n);
+  }
+  return danger;
+}
+
+async function generateConventionalCommit({ diffStat, fullDiff, branch }) {
+  const isJa = CFG.lang === "ja";
+
+  const system = isJa
+    ? [
+        "あなたはGitのコミットメッセージ生成器です。",
+        "必ず Conventional Commits 形式で出力します。",
+        "出力は JSON のみ（説明文なし）。",
+        "先頭行は 72文字以内。",
+        "type は feat|fix|refactor|perf|docs|test|build|ci|chore|style のどれか。",
+        "subject は日本語で簡潔に（命令形っぽく、体言止めでも可）。",
+        "body は日本語で箇条書き（- で始める）最大5行。",
+        "破壊的変更がある場合 footer に 'BREAKING CHANGE: ...' を入れる。",
+      ].join("\n")
+    : [
+        "You generate git commit messages.",
+        "Output JSON only (no prose).",
+        "Use Conventional Commits.",
+        "Header max 72 chars.",
+        "type must be one of feat|fix|refactor|perf|docs|test|build|ci|chore|style.",
+        "Subject concise, imperative.",
+        "Body bullet list (max 5).",
+        "If breaking change, include footer 'BREAKING CHANGE: ...'.",
+      ].join("\n");
+
+  const user = isJa
+    ? `ブランチ: ${branch}\n\n以下は staged changes の要約(stat)：\n${diffStat}\n\n以下は staged diff（全文）：\n${fullDiff}\n\n要求：\n1) 変更内容に最も合う type を選ぶ\n2) scope はあれば短く（例: inventory, ebay, api, ui）\n3) subject は日本語で短く（72文字以内に収める）\n4) body は日本語の箇条書き（最大5行）\n5) 破壊的変更があるなら footer に BREAKING CHANGE を入れる\n\nJSON形式：\n{\n  "type": "...",\n  "scope": "...(optional)",\n  "subject": "...",\n  "body": "- ...\\n- ...",\n  "footer": "BREAKING CHANGE: ...(optional)"\n}`
+    : `Branch: ${branch}\n\nStaged changes stat:\n${diffStat}\n\nFull staged diff:\n${fullDiff}\n\nReturn JSON:\n{\n  "type": "...",\n  "scope": "... (optional)",\n  "subject": "...",\n  "body": "- ...\\n- ...",\n  "footer": "BREAKING CHANGE: ...(optional)"\n}`;
+
+  const completion = await openai.chat.completions.create({
+    model: CFG.model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    max_tokens: 350,
+  });
+
+  const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // フォールバック（JSONじゃなかった時）
+    parsed = {
+      type: "chore",
+      scope: "",
+      subject: isJa ? "変更を反映" : "apply changes",
+      body: "",
+      footer: "",
+    };
+  }
+
+  return safeCommitMessageFromJson(parsed);
+}
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
@@ -21,98 +174,104 @@ function safeFirstLine(s) {
 }
 
 async function main() {
-  // 1) 変更が無いなら終了
-  const status = run("git", ["status", "--porcelain"]);
-  if (!status) {
-    console.log("No changes. Nothing to commit.");
-    return;
-  }
-
-  // 2) 差分情報を集める（AI無しでも最低限の要約ができるように）
-  const nameStatus = run("git", ["diff", "--name-status"]);
-  const stat = run("git", ["diff", "--stat"]);
-  const branch = run("git", ["branch", "--show-current"]);
-
-  // 3) コミットメッセージ生成（AIが使えなければローカル要約にフォールバック）
-  let message = "";
-  const apiKey = process.env.OPENAI_API_KEY;
-
-  if (apiKey) {
-    try {
-      // OpenAI Responses API を直接叩く（追加ライブラリ不要）
-      const prompt = [
-        "You are an expert engineer writing a concise Conventional Commits message.",
-        "Rules:",
-        "- Output ONLY one line commit message.",
-        "- Use Conventional Commits type: feat/fix/chore/refactor/docs/test.",
-        "- Must be <= 72 chars.",
-        "- Be specific but short.",
-        "",
-        `Branch: ${branch}`,
-        "",
-        "git diff --name-status:",
-        nameStatus,
-        "",
-        "git diff --stat:",
-        stat,
-      ].join("\n");
-
-      const res = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4.1-mini",
-          input: prompt,
-          max_output_tokens: 60,
-        }),
-      });
-
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(`OpenAI error: ${res.status} ${t}`);
-      }
-      const data = await res.json();
-
-      // responses は output_text が付くことが多いのでまずそれを使う
-      message = safeFirstLine(data.output_text || "");
-    } catch (e) {
-      console.log("AI message generation failed. Fallback to local summary.");
-      console.log(String(e.message || e));
-    }
-  }
-
-  if (!message) {
-    // AIが無い/失敗した場合のフォールバック（最低限）
-    const files = nameStatus
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .slice(0, 6)
-      .map((l) => l.replace(/\s+/g, " "))
-      .join(", ");
-    message = safeFirstLine(`chore: update ${files || "changes"}`);
-  }
-
-  console.log("Commit message:", message);
-
-  // 4) add -> commit -> push（1コマンドで完結）
-  run("git", ["add", "-A"]);
-  run("git", ["commit", "-m", `"${message.replace(/"/g, '\\"')}"`]);
-
-  // push は失敗することもあるので try にする（コミットは残す）
   try {
-    run("git", ["push", "origin", branch]);
-    console.log("Pushed to origin:", branch);
-  } catch (e) {
-    console.log("Commit created, but push failed. You can push later.");
-    console.log(String(e.message || e));
+    if (!process.env.OPENAI_API_KEY) {
+      console.error("❌ OPENAI_API_KEY is missing.");
+      process.exit(1);
+    }
+
+    // 1) Stage
+    console.log("🔍 Staging changes...");
+    shInherit("git add -A");
+
+    const diffStat = sh("git diff --cached --stat");
+    if (!diffStat) {
+      console.log("✅ No staged changes. Nothing to commit.");
+      return;
+    }
+
+    const branch = sh("git rev-parse --abbrev-ref HEAD");
+
+    // 2) Guard: no direct commit/push on main/master
+    if (branch === "main" || branch === "master") {
+      console.error(`❌ Refusing to commit/push directly on ${branch}.`);
+      console.error(`   Create a feature branch first, e.g.: git switch -c feature/<topic>`);
+      process.exit(1);
+    }
+
+    // 3) Guard: dangerous staged files
+    const stagedNames = sh("git diff --cached --name-only")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const danger = detectDangerousFiles(stagedNames);
+    if (danger.length) {
+      console.error("❌ Dangerous files are staged (possible secrets). Aborting.");
+      for (const f of danger) console.error(` - ${f}`);
+      console.error("👉 Unstage/remove them, then retry.");
+      process.exit(1);
+    }
+
+    // 4) Size control
+    const numStat = sh("git diff --cached --numstat");
+    const { files, totalLines } = parseNumStat(numStat);
+
+    // use minimal context diff to reduce tokens
+    const fullDiff = sh("git diff --cached --unified=0");
+
+    if (!CFG.forceLarge) {
+      if (files > CFG.maxFiles || totalLines > CFG.maxLines || fullDiff.length > CFG.maxChars) {
+        console.error("❌ Changes are too large for safe AI commit summarization. Aborting.");
+        console.error(`   files: ${files} (limit ${CFG.maxFiles})`);
+        console.error(`   lines: ${totalLines} (limit ${CFG.maxLines})`);
+        console.error(`   diff chars: ${fullDiff.length} (limit ${CFG.maxChars})`);
+        console.error("👉 Please split into smaller commits and rerun.");
+        console.error("   (If you really must, set COMMIT_FORCE_LARGE=1 temporarily)");
+        process.exit(1);
+      }
+    }
+
+    // 5) Generate commit message (full diff)
+    console.log("🤖 Generating conventional commit message with AI...");
+    const message = await generateConventionalCommit({ diffStat, fullDiff, branch });
+
+    console.log(`📝 Commit message:\n${message}\n`);
+
+    // 6) Commit
+    const escaped = message.replace(/"/g, '\\"');
+    shInherit(`git commit -m "${escaped.split("\n")[0]}"`+ (message.includes("\n\n") ? "" : ""));
+
+    // If body exists, amend with body via -F to avoid quoting issues
+    if (message.includes("\n\n")) {
+      const fs = await import("fs");
+      const path = await import("path");
+      const tmp = path.join(process.cwd(), ".git", "COMMIT_AUTO_MSG.txt");
+      fs.writeFileSync(tmp, message, "utf8");
+      shInherit(`git commit --amend -F "${tmp}"`);
+      fs.unlinkSync(tmp);
+    }
+
+    // 7) Push (auto-setup upstream if missing)
+    console.log("🚀 Pushing...");
+    try {
+      shInherit("git push");
+    } catch (e) {
+      const msg = String(e?.message || "");
+      if (!msg.includes("has no upstream branch")) throw e;
+      console.log(`ℹ️ No upstream. Setting upstream to origin/${branch}...`);
+      shInherit(`git push -u origin ${branch}`);
+    }
+
+    console.log("✅ Done.");
+  } catch (err) {
+    console.error("❌ Error:", err?.message || err);
+    try {
+      console.log("\n--- git status ---");
+      shInherit("git status");
+    } catch {}
+    process.exit(1);
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main();
