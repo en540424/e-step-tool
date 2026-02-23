@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "commit:auto": "node scripts/auto-commit.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.93.3",

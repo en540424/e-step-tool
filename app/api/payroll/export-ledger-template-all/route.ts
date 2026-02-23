@@ -166,7 +166,7 @@ function cloneWorksheetLayoutAndLabels(src: ExcelJS.Worksheet, dst: ExcelJS.Work
 
 function dumpTemplateCells(ws: ExcelJS.Worksheet) {
   const maxRow = Math.max(ws.rowCount, 40);
-  const maxCol = Math.max(ws.columnCount, 20);
+  const maxCol = Math.max(ws.columnCount, 80); // BC列(55)超えのテンプレにも対応
   const lines: string[] = [];
 
   for (let r = 1; r <= maxRow; r++) {
@@ -486,6 +486,9 @@ export async function POST(req: Request) {
     const baseWb = new ExcelJS.Workbook();
     await baseWb.xlsx.readFile(templatePath);
     const baseWs = baseWb.worksheets[0];
+    if (!baseWs) {
+      return NextResponse.json({ error: "base_template_sheet_not_found" }, { status: 500 });
+    }
 
     // ② 出力用（ここにシートを増やして返す）
     const outWb = new ExcelJS.Workbook();
