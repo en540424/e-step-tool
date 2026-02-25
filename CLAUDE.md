@@ -49,3 +49,6 @@ AI MUST read and follow, in this order:
 3. docs/decision-log.md
 
 If any conflict exists, the higher priority document always wins.
+## Skills運用
+- 変更作業は `.claude/skills/safe-refactor.md` に従う
+- 迷ったら safe-refactor を適用する
