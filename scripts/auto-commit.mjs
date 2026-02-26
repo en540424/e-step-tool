@@ -173,7 +173,7 @@ function safeFirstLine(s) {
   return line.slice(0, 72) || "chore: update";
 }
 
-async function main() {
+async function run() {
   try {
     if (!process.env.OPENAI_API_KEY) {
       console.error("❌ OPENAI_API_KEY is missing.");
@@ -274,4 +274,4 @@ async function main() {
   }
 }
 
-main();
+run();
