@@ -1,8 +1,8 @@
-import { execSync, spawnSync } from "child_process";
+import { execSync } from "child_process";
 import OpenAI from "openai";
 
 function sh(cmd) {
-  return execSync(cmd, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" }).trim();
+  return execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 }
 function shInherit(cmd) {
   execSync(cmd, { stdio: "inherit" });
@@ -49,15 +49,16 @@ function sanitizeOneLine(s) {
 }
 
 function safeCommitMessageFromJson(j) {
-  const type = ALLOWED_TYPES.has(j?.type) ? j.type : "chore";
-  const scopeRaw = sanitizeOneLine(j?.scope || "");
+  const type = ALLOWED_TYPES.has(j.type) ? j.type : "chore";
+  const scopeRaw = sanitizeOneLine(j.scope || "");
   const scope = scopeRaw ? `(${scopeRaw.replace(/[()]/g, "")})` : "";
-  const subject = sanitizeOneLine(j?.subject || "");
+  const subject = sanitizeOneLine(j.subject || "");
 
+  // Conventional Commits: type(scope): subject
   const header = `${type}${scope}: ${subject || "update"}`.slice(0, 72);
 
-  const body = String(j?.body || "").trim();
-  const footer = String(j?.footer || "").trim();
+  const body = String(j.body || "").trim();
+  const footer = String(j.footer || "").trim();
 
   let msg = header;
   if (body) msg += `\n\n${body}`;
@@ -66,14 +67,11 @@ function safeCommitMessageFromJson(j) {
 }
 
 function parseNumStat(numStatText) {
+  // lines: "12\t3\tpath"
   let files = 0;
   let add = 0;
   let del = 0;
-  const lines = String(numStatText || "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-
+  const lines = numStatText.split("\n").map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
     const [a, d] = line.split("\t");
     files += 1;
@@ -126,8 +124,8 @@ async function generateConventionalCommit({ diffStat, fullDiff, branch }) {
       ].join("\n");
 
   const user = isJa
-    ? `ブランチ: ${branch}\n\n以下は staged changes の要約(stat)：\n${diffStat}\n\n以下は staged diff（全文）：\n${fullDiff}\n\n要求：\n1) 変更内容に最も合う type を選ぶ\n2) scope はあれば短く（例: payroll, api, ui, db）\n3) subject は日本語で短く（72文字以内）\n4) body は日本語の箇条書き（最大5行）\n5) 破壊的変更があるなら footer に BREAKING CHANGE を入れる\n\nJSON形式：\n{\n  \"type\": \"...\",\n  \"scope\": \"...(optional)\",\n  \"subject\": \"...\",\n  \"body\": \"- ...\\n- ...\",\n  \"footer\": \"BREAKING CHANGE: ...(optional)\"\n}`
-    : `Branch: ${branch}\n\nStaged changes stat:\n${diffStat}\n\nFull staged diff:\n${fullDiff}\n\nReturn JSON:\n{\n  \"type\": \"...\",\n  \"scope\": \"... (optional)\",\n  \"subject\": \"...\",\n  \"body\": \"- ...\\n- ...\",\n  \"footer\": \"BREAKING CHANGE: ...(optional)\"\n}`;
+    ? `ブランチ: ${branch}\n\n以下は staged changes の要約(stat)：\n${diffStat}\n\n以下は staged diff（全文）：\n${fullDiff}\n\n要求：\n1) 変更内容に最も合う type を選ぶ\n2) scope はあれば短く（例: inventory, ebay, api, ui）\n3) subject は日本語で短く（72文字以内に収める）\n4) body は日本語の箇条書き（最大5行）\n5) 破壊的変更があるなら footer に BREAKING CHANGE を入れる\n\nJSON形式：\n{\n  "type": "...",\n  "scope": "...(optional)",\n  "subject": "...",\n  "body": "- ...\\n- ...",\n  "footer": "BREAKING CHANGE: ...(optional)"\n}`
+    : `Branch: ${branch}\n\nStaged changes stat:\n${diffStat}\n\nFull staged diff:\n${fullDiff}\n\nReturn JSON:\n{\n  "type": "...",\n  "scope": "... (optional)",\n  "subject": "...",\n  "body": "- ...\\n- ...",\n  "footer": "BREAKING CHANGE: ...(optional)"\n}`;
 
   const completion = await openai.chat.completions.create({
     model: CFG.model,
@@ -143,6 +141,7 @@ async function generateConventionalCommit({ diffStat, fullDiff, branch }) {
   try {
     parsed = JSON.parse(raw);
   } catch {
+    // フォールバック（JSONじゃなかった時）
     parsed = {
       type: "chore",
       scope: "",
@@ -155,8 +154,7 @@ async function generateConventionalCommit({ diffStat, fullDiff, branch }) {
   return safeCommitMessageFromJson(parsed);
 }
 
-// shell helper (avoid name clash with main())
-function execCmd(cmd, args = [], opts = {}) {
+function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
     encoding: "utf8",
     shell: true,
@@ -170,7 +168,12 @@ function execCmd(cmd, args = [], opts = {}) {
   return (r.stdout || "").trim();
 }
 
-async function main() {
+function safeFirstLine(s) {
+  const line = (s || "").split(/\r?\n/)[0].trim();
+  return line.slice(0, 72) || "chore: update";
+}
+
+async function run() {
   try {
     if (!process.env.OPENAI_API_KEY) {
       console.error("❌ OPENAI_API_KEY is missing.");
@@ -214,6 +217,7 @@ async function main() {
     const numStat = sh("git diff --cached --numstat");
     const { files, totalLines } = parseNumStat(numStat);
 
+    // use minimal context diff to reduce tokens
     const fullDiff = sh("git diff --cached --unified=0");
 
     if (!CFG.forceLarge) {
@@ -235,16 +239,17 @@ async function main() {
     console.log(`📝 Commit message:\n${message}\n`);
 
     // 6) Commit
+    const escaped = message.replace(/"/g, '\\"');
+    shInherit(`git commit -m "${escaped.split("\n")[0]}"`+ (message.includes("\n\n") ? "" : ""));
+
+    // If body exists, amend with body via -F to avoid quoting issues
     if (message.includes("\n\n")) {
       const fs = await import("fs");
       const path = await import("path");
       const tmp = path.join(process.cwd(), ".git", "COMMIT_AUTO_MSG.txt");
       fs.writeFileSync(tmp, message, "utf8");
-      shInherit(`git commit -F "${tmp}"`);
+      shInherit(`git commit --amend -F "${tmp}"`);
       fs.unlinkSync(tmp);
-    } else {
-      const header = message.replace(/"/g, '\\"');
-      shInherit(`git commit -m "${header}"`);
     }
 
     // 7) Push (auto-setup upstream if missing)
@@ -269,7 +274,4 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error("❌ Fatal:", e?.message || e);
-  process.exit(1);
-});
+run();
