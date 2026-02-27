@@ -122,3 +122,8 @@
 
 ## 8. 例外
 - 例外は実装前に `docs/decision-log.md` に記録する（口約束禁止）
+## 4. Python優先検算ルール
+
+- 計算 / 整形 / 監査が絡む場合は Python を先に使って検算し、
+  Implementation rule を残してから実装する
+  Pythonで導いた結論は、必ず純関数として分離し、UIから直接書かない
