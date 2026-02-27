@@ -80,7 +80,18 @@ function forceSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: an
     const master = (cell as any).master as ExcelJS.Cell | undefined;
     if (master) cell = master;
   }
-  cell.value = value; // 数式があっても上書き
+  // ExcelJS の内部モデルから formula/sharedFormula を削除する
+  // （cell.value = x だけでは sharedFormula 参照が残り、Excel 開時の再計算で値が上書きされる）
+  try {
+    const m = (cell as any)._model;
+    if (m) {
+      delete m.formula;
+      delete m.sharedFormula;
+      delete m.result;
+      if (m.type === 6 /* Formula */) m.type = value == null ? 0 : 2;
+    }
+  } catch { /* 内部APIが変わっても安全に継続 */ }
+  cell.value = value;
 }
 
 /** アドレス文字列版（ヘッダ用） */
@@ -126,6 +137,8 @@ function buildPeriodStarts(ws: ExcelJS.Worksheet, headerRow = 7) {
     if (starts[t] == null) starts[t] = startCol;
   }
 
+  // ⚠ テンプレに存在しない月（例: 9月列が無いテンプレ）は 0 のまま → writeMonthly でスキップされる
+  // 補完推定は隣接月の結合セル内に誤って書き込む危険があるため行わない
   const months = Array.from({ length: 12 }, (_, i) => `${i + 1}月`);
 
   // ⚠ filter(Boolean) 禁止 — 欠落月があるとインデックスがズレて全月の列がずれる
@@ -141,6 +154,74 @@ function buildPeriodStarts(ws: ExcelJS.Worksheet, headerRow = 7) {
     bonus2: starts["賞与２"] ?? starts["賞与2"],
     total: starts["合計"],
   };
+}
+
+/** テンプレに 9月 列が無い場合に動的挿入（8月直後に 4 列追加） */
+function ensureSeptemberColumn(ws: ExcelJS.Worksheet): void {
+  const { monthStarts } = buildPeriodStarts(ws, INPUT_CELLS.headerRow);
+
+  if (monthStarts[8] !== 0) {
+    console.log("[ensureSeptemberColumn] 9月 already present at col", monthStarts[8]);
+    return;
+  }
+
+  const aug = monthStarts[7]; // 8月 開始列
+  const oct = monthStarts[9]; // 10月 開始列
+  if (!aug || !oct) {
+    console.warn("[ensureSeptemberColumn] Cannot insert: 8月 or 10月 not found");
+    return;
+  }
+  if (aug + 4 !== oct) {
+    // 想定外のギャップ → 安全のためスキップ
+    console.warn(`[ensureSeptemberColumn] Unexpected layout aug=${aug} oct=${oct}. Skipping.`);
+    return;
+  }
+
+  const insertAt = oct; // 10月直前 = 8月直後
+  console.log(`[ensureSeptemberColumn] Inserting 9月 at col ${insertAt}`);
+
+  // 4列挿入
+  ws.spliceColumns(insertAt, 0, [], [], [], []);
+
+  // ヘッダ行に "9月" を設定（4列結合）
+  const hRow = INPUT_CELLS.headerRow;
+  try { ws.unMergeCells(hRow, insertAt, hRow, insertAt + 3); } catch { /* noop */ }
+  ws.mergeCells(hRow, insertAt, hRow, insertAt + 3);
+  const hCell = ws.getCell(hRow, insertAt);
+  hCell.value = "9月";
+
+  // 8月ヘッダのスタイルをコピー
+  try {
+    const augCell = ws.getCell(hRow, aug);
+    const src = augCell.isMerged ? ((augCell as any).master as ExcelJS.Cell) : augCell;
+    if (src.font) hCell.font = JSON.parse(JSON.stringify(src.font));
+    if ((src.fill as any)?.type) hCell.fill = JSON.parse(JSON.stringify(src.fill)) as ExcelJS.Fill;
+    if (src.border) hCell.border = JSON.parse(JSON.stringify(src.border));
+    if (src.alignment) hCell.alignment = JSON.parse(JSON.stringify(src.alignment));
+  } catch { /* スタイルコピー失敗は無視 */ }
+
+  // 列幅を 8月 からコピー
+  for (let offset = 0; offset < 4; offset++) {
+    const w = ws.getColumn(aug + offset).width;
+    if (w) ws.getColumn(insertAt + offset).width = w;
+  }
+
+  // データ行（8〜38）のスタイルを 8月 からコピー
+  for (let r = 8; r <= 38; r++) {
+    for (let offset = 0; offset < 4; offset++) {
+      try {
+        const srcCell = ws.getCell(r, aug + offset);
+        const dstCell = ws.getCell(r, insertAt + offset);
+        if (srcCell.numFmt) dstCell.numFmt = srcCell.numFmt;
+        if (srcCell.font) dstCell.font = JSON.parse(JSON.stringify(srcCell.font));
+        if ((srcCell.fill as any)?.type) dstCell.fill = JSON.parse(JSON.stringify(srcCell.fill)) as ExcelJS.Fill;
+        if (srcCell.border) dstCell.border = JSON.parse(JSON.stringify(srcCell.border));
+        if (srcCell.alignment) dstCell.alignment = JSON.parse(JSON.stringify(srcCell.alignment));
+      } catch { /* skip */ }
+    }
+  }
+
+  console.log(`[ensureSeptemberColumn] Done. cols ${insertAt}-${insertAt + 3} added for 9月`);
 }
 
 /** 1行分の月別データ（12ヶ月）を安全に書き込む */
@@ -216,14 +297,16 @@ const INPUT_CELLS = {
     employmentIns: 29,
     incomeTax: 32,
     residentTax: 33,
-    // ※ 課税合計(23)・非課税合計(24)・総支給(25)・社保合計(30)・
-    //    課税対象額(31)・控除額合計(36)・差引支給(37) は数式 → 書き込み禁止
+    // ※ 課税合計(23)・非課税合計(24)・総支給(25)・課税対象額(31)・差引支給(37) は数式 → 書き込み禁止
+    // ⚠ 社保合計(30)・控除額合計(36) はテンプレ数式が特定月で壊れている場合があるため明示書き込み
+    socialInsTotal: 30,
+    deductionTotal: 36,
   },
-  // ✅ 可変手当エリア（課税手当：17〜21 の 5 行）
+  // ✅ 可変手当エリア（課税手当：16〜21 の 6 行）
   // ⚠ 行22 = 非課税専用行（行24の formula="I22" で非課税合計に使われる）
   //   行22 に課税手当を書くと ダブルカウント になるため endRow=21 で止める
   allowanceArea: {
-    startRow: 17,
+    startRow: 16,  // 夜勤固定行を廃止し、row16も動的エリアに含める
     endRow: 21,   // ← 行22は非課税行のため書き込み禁止
     labelCol: 1,  // A列（結合マスター）
   },
@@ -259,7 +342,7 @@ function fillLedgerSheet(
   // 支給（0なら空欄）
   writeMonthly(ws, R.baseSalary, monthStarts, monthly.map(v => v.baseSalary), { blankIfZero: true });
   writeMonthly(ws, R.specialAllowance, monthStarts, monthly.map(v => v.specialAllowance), { blankIfZero: true });
-  writeMonthly(ws, R.nightAllowance, monthStarts, monthly.map(v => v.nightAllowance), { blankIfZero: true });
+  // row16 (夜勤) は動的allowanceAreaに移したため固定書き込みなし
 
   // 固定ラベル行(14:基本給, 15:特別手当, 16:夜勤)を
   // A-H(8列) → A独立 + B-G結合 に変換して控除ラベルと同じ幅・配置にする
@@ -268,7 +351,7 @@ function fillLedgerSheet(
     const colARef14 = ws.getCell(R.healthIns, 1);
     const colAFill14 = colARef14.fill as ExcelJS.Fill | undefined;
     const colABorder14 = colARef14.border as ExcelJS.Borders | undefined;
-    for (const fixedRow of [R.baseSalary, R.specialAllowance, R.nightAllowance]) {
+    for (const fixedRow of [R.baseSalary, R.specialAllowance]) {
       // 現在の値 & B列ボーダーを退避（unMerge後に失われるため）
       let cur = ws.getCell(fixedRow, 1);
       if (cur.isMerged) { const m = (cur as any).master as ExcelJS.Cell | undefined; if (m) cur = m; }
@@ -284,7 +367,8 @@ function fillLedgerSheet(
       // B-G 結合してラベル書き込み
       ws.mergeCells(fixedRow, 2, fixedRow, 7);
       const labelCell = ws.getCell(fixedRow, 2);
-      labelCell.value = curVal;
+      // row15 は「特別手当」→「固定残業代」にラベルを差し替え
+      labelCell.value = fixedRow === R.specialAllowance ? "固定残業代" : curVal;
       labelCell.font = { ...fixedLabelFont };
       labelCell.alignment = { horizontal: "distributed", vertical: "middle", wrapText: false };
       // 左右罫線を除去して top/bottom のみ（row26-27 と同じスタイル）
@@ -336,20 +420,21 @@ function fillLedgerSheet(
     }
 
     // 枠を完全クリア（ラベル列＋全月の金額列）
+    // ⚠ テンプレにformulaがある行(row16:夜勤など)もforceで上書きしてクリア
     for (let i = 0; i < maxRows; i++) {
       const r = startRow + i;
       writeLabelCell(r, null);
       for (const col of monthStarts) {
-        if (col) safeSetCell(ws, r, col, null);
+        if (col) forceSetCell(ws, r, col, null);
       }
     }
 
-    // ラベルを行に割り当てて金額を流す
+    // ラベルを行に割り当てて金額を流す（formula上書きのためforce:true）
     limited.forEach((label, i) => {
       const r = startRow + i;
       writeLabelCell(r, label);
       const values = monthly.map(m => m.allowanceItems.find(a => a.label === label)?.yen ?? null);
-      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true });
+      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true, force: true });
     });
 
     // 溢れた分は最終行に合算
@@ -362,7 +447,7 @@ function fillLedgerSheet(
           .reduce((acc, a) => acc + a.yen, 0);
         return sum === 0 ? null : sum;
       });
-      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true });
+      writeMonthly(ws, r, monthStarts, values, { blankIfZero: true, force: true });
     }
   }
 
@@ -374,7 +459,18 @@ function fillLedgerSheet(
   writeMonthly(ws, R.incomeTax, monthStarts, monthly.map(v => v.incomeTax), { blankIfZero: true, force: true });
   writeMonthly(ws, R.residentTax, monthStarts, monthly.map(v => v.residentTax), { blankIfZero: true, force: true });
 
-  // 合計・差引はすべてテンプレの数式に任せる（書き込まない）
+  // 行30（社会保険料合計）・行36（控除額合計）: テンプレ数式が特定月で壊れている場合があるため明示上書き
+  writeMonthly(ws, R.socialInsTotal, monthStarts, monthly.map(v => {
+    const s = (v.healthIns ?? 0) + (v.unionFee ?? 0) + (v.pensionIns ?? 0) + (v.employmentIns ?? 0);
+    return s === 0 ? null : s;
+  }), { blankIfZero: true, force: true });
+  writeMonthly(ws, R.deductionTotal, monthStarts, monthly.map(v => {
+    const s = (v.healthIns ?? 0) + (v.unionFee ?? 0) + (v.pensionIns ?? 0) + (v.employmentIns ?? 0)
+            + (v.incomeTax ?? 0) + (v.residentTax ?? 0);
+    return s === 0 ? null : s;
+  }), { blankIfZero: true, force: true });
+
+  // 課税合計(23)・非課税合計(24)・総支給(25)・課税対象額(31)・差引支給(37) はテンプレ数式に任せる
 }
 
 // ========== POST ハンドラ ==========
@@ -438,6 +534,9 @@ export async function POST(req: Request) {
     if (!ws) {
       return NextResponse.json({ error: "template_sheet_not_found" }, { status: 500 });
     }
+
+    // 9月列がテンプレに無い場合は動的挿入
+    ensureSeptemberColumn(ws);
 
     fillLedgerSheet(ws, monthly, year, {
       name: employeeName,
@@ -602,15 +701,14 @@ async function getMonthlyPayrollData(args: {
     };
 
     const templateDetail = res.allowances?.templateDetail ?? {};
-    // 特別手当: テンプレ + AllowanceRow の合算（どちらか一方でも可）
-    const templateSpecial = templateDetail["特別手当"] ?? templateDetail["固定残業代"] ?? 0;
+    // 特別手当（テンプレ設定分）: row15ではなくallowanceItemsに移す
+    const templateSpecial = templateDetail["特別手当"] ?? 0;
     const rowSpecial = findAllowFb("special_allowance", "特別手当") ?? 0;
     // res.baseYen がある場合（新形式）は fixedIncludedYen を別行に表示する
     // res.baseYen が無い場合（旧形式）は grossYen に fixedOT が内包されているため加算しない
     const engineFixedOt = res.baseYen != null ? (res.overtime?.fixedIncludedYen ?? 0) : 0;
-    // ⚠ rowFixedOt（UI手入力の「定額残業費」= allowance_rows の fixed_ot_allowance）は
-    //   allowanceItems として row17-21 に出力するため row15 には加算しない
-    months[idx].specialAllowance = (templateSpecial + rowSpecial + engineFixedOt) || null;
+    // row15 = 固定残業代（自動計算分のみ）。特別手当はallowanceItemsに移す
+    months[idx].specialAllowance = engineFixedOt || null;
     months[idx].nightAllowance = templateDetail["夜勤"] ?? templateDetail["夜勤手当"] ?? null;
 
     // 手当（可変）: allowance_rows + rowsDetail を label→yen に統合
@@ -628,12 +726,18 @@ async function getMonthlyPayrollData(args: {
         if (!key || !Number.isFinite(yen) || yen === 0) continue;
         if (merged[key] == null) merged[key] = yen; // allowance_rows 優先
       }
-      // 固定行(15: 特別手当, 16: 夜勤)で出すものは重複除外
-      // ⚠ 「定額残業費」(id=fixed_ot_allowance) は allowanceItems として row17-21 に出力するため除外しない
-      delete merged["特別手当"];
+      // 固定残業代はrow15に出すため除外。夜勤・特別手当はrow16廃止によりallowanceItemsに移動
       delete merged["固定残業代"];
-      delete merged["夜勤"];
-      delete merged["夜勤手当"];
+      // templateDetail 由来の特別手当が merged に未登録なら追加
+      const specialFromTemplate = (templateSpecial + rowSpecial);
+      if (specialFromTemplate > 0 && !merged["特別手当"]) {
+        merged["特別手当"] = specialFromTemplate;
+      }
+      // templateDetail 由来の夜勤手当が merged に未登録なら追加
+      const nightFromTemplate = templateDetail["夜勤"] ?? templateDetail["夜勤手当"] ?? 0;
+      if (nightFromTemplate > 0 && !merged["夜勤"] && !merged["夜勤手当"]) {
+        merged["夜勤"] = nightFromTemplate;
+      }
       months[idx].allowanceItems = Object.entries(merged).map(([label, yen]) => ({ label, yen }));
     }
 

@@ -144,6 +144,12 @@ export async function POST(req: Request) {
 
         // テンプレートシートを複製（model コピー方式）
         const ws = cloneWorksheetByModel(wb, templateWs, sheetName);
+        // row15 ラベルを「固定残業代」に更新（テンプレの「特別手当」を上書き）
+        {
+          let r15 = ws.getCell(ROW_MAP.specialAllowance, 1);
+          if (r15.isMerged) { const m = (r15 as any).master as ExcelJS.Cell | undefined; if (m) r15 = m; }
+          r15.value = "固定残業代";
+        }
 
         // 手動修正があるかチェック
         const hasManualModification = months.some(m => m.incomeTaxSource === "manual");
@@ -386,15 +392,10 @@ async function fetchEmployeeYearData(
     const rowsDetail = res.allowances?.rowsDetail ?? {};
     const templateDetail = res.allowances?.templateDetail ?? {};
     
-    // 特別手当: 手入力または固定残業代
-    months[idx].specialAllowance = 
-      findAllow("special_allowance") ||
-      findAllow("fixed_ot_allowance") ||
-      (rowsDetail["特別手当"]?.yen ?? 0) ||
-      (rowsDetail["定額残業費"]?.yen ?? 0) ||
-      (templateDetail["特別手当"] ?? 0) ||
-      (templateDetail["固定残業代"] ?? 0) ||
-      0;
+    // row15 = 固定残業代（エンジン自動計算分のみ）
+    // 特別手当はallowanceItemsとして別途表示（このルートでは集計に影響しない）
+    months[idx].specialAllowance =
+      (res.baseYen != null ? (res.overtime?.fixedIncludedYen ?? 0) : 0);
     
     // 夜勤手当
     months[idx].nightAllowance = 

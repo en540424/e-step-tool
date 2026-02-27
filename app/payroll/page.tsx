@@ -1,7 +1,7 @@
 // app/payroll/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { getSupabaseClient } from "@/app/_lib/supabase/client";
 import { calcPayroll, PremiumTable, calcEmploymentInsuranceYen } from "@/app/_lib/payroll/engine";
@@ -133,13 +133,12 @@ type AllowanceRow = {
 };
 
 const defaultAllowanceRows: AllowanceRow[] = [
-  { id: "fixed_ot_allowance",   label: "定額残業費", yen: 0, isTaxable: true },
+  { id: "leave_allowance",      label: "休業手当",   yen: 0, isTaxable: true },
   { id: "special_allowance",    label: "特別手当",   yen: 0, isTaxable: true },
   { id: "housing_allowance",    label: "住宅手当",   yen: 0, isTaxable: true },
   { id: "skill_allowance",      label: "技能手当",   yen: 0, isTaxable: true },
   { id: "attendance_allowance", label: "皆勤手当",   yen: 0, isTaxable: true },
   { id: "absence_deduction",    label: "欠勤控除",   yen: 0, isTaxable: true },
-  { id: "leave_allowance",      label: "休業手当",   yen: 0, isTaxable: true },
 ];
 
 type DeductionRow = {
@@ -235,7 +234,7 @@ function mergeAllowanceRows(defaults: AllowanceRow[], saved: AllowanceRow[]) {
     return s
       ? {
           ...d,
-          label: s.label ?? d.label,
+          label: s.label || d.label,  // || で空文字もデフォルトにフォールバック
           yen: Number(s.yen ?? 0),
           isTaxable: s.isTaxable ?? d.isTaxable,
           isRecurring: s.isRecurring ?? d.isRecurring,
@@ -308,13 +307,12 @@ function AllowanceRowsEditor({
   onChange: (rows: AllowanceRow[]) => void;
 }) {
   const fixedIds = new Set([
-    "fixed_ot_allowance",
+    "leave_allowance",
     "special_allowance",
     "housing_allowance",
     "skill_allowance",
     "attendance_allowance",
     "absence_deduction",
-    "leave_allowance",
   ]);
 
   const updateYen = (id: string, yen: number) => {
@@ -789,7 +787,10 @@ export default function PayrollPage() {
   const [rules, setRules] = useState<any>(null);
   const [withholdingKo, setWithholdingKo] = useState<WithholdingKoRow[]>([]);
 
-  const [employeeId, setEmployeeId] = useState<string>("");
+  const [employeeId, setEmployeeId] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return localStorage.getItem("payroll_last_employee_id") ?? "";
+  });
   const [ym, setYm] = useState(currentYYYYMM());
 
   // ✅ 税年度（2025/2026/2027）- 対象月から自動取得 or 手動上書き
@@ -821,6 +822,8 @@ export default function PayrollPage() {
   // 手当・控除
   const [allowanceRows, setAllowanceRows] = useState<AllowanceRow[]>(defaultAllowanceRows);
   const [deductionRows, setDeductionRows] = useState<DeductionRow[]>(defaultDeductionRows);
+  // 休業手当ページからの引き継ぎ値（従業員選択後のlocalStorage復元に上書きされないよう保持）
+  const pendingLeaveAllowanceRef = useRef<number | null>(null);
 
   // 所得税（自動計算値：後で源泉税額表ロジックに差し替える）
   const [incomeTaxAutoYen, setIncomeTaxAutoYen] = useState<number>(0);
@@ -902,6 +905,9 @@ export default function PayrollPage() {
     if (v) {
       const n = Number(v);
       if (Number.isFinite(n) && n > 0) {
+        // ref に保持（従業員選択時のlocalStorage復元後に上書き適用するため）
+        pendingLeaveAllowanceRef.current = n;
+        // 従業員未選択時のプレビュー用にも即時反映
         setAllowanceRows((prev) =>
           prev.map((r) => (r.id === "leave_allowance" ? { ...r, yen: n } : r))
         );
@@ -1050,6 +1056,23 @@ export default function PayrollPage() {
     // ③ 何もなし
     setAllowanceRows(defaultAllowanceRows);
   }, [employeeId, ym]);
+
+  // ✅ 休業手当の引き継ぎ値を localStorage 復元の後に適用（定義順により復元effectの後に実行）
+  useEffect(() => {
+    if (!employeeId || pendingLeaveAllowanceRef.current === null) return;
+    const leaveYen = pendingLeaveAllowanceRef.current;
+    pendingLeaveAllowanceRef.current = null;
+    setAllowanceRows((prev) =>
+      prev.map((r) => (r.id === "leave_allowance" ? { ...r, yen: leaveYen } : r))
+    );
+  }, [employeeId, ym]);
+
+  // ✅ 最後に選択した従業員を記憶（次回ページ開時に自動復元）
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!employeeId) return;
+    localStorage.setItem("payroll_last_employee_id", employeeId);
+  }, [employeeId]);
 
   // ✅ allowanceRows の localStorage 保存
   useEffect(() => {
