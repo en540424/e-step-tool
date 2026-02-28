@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { MonthInput } from "@/app/_components/MonthInput";
 import Link from "next/link";
 import { getSupabaseClient } from "@/app/_lib/supabase/client";
 import { calcPayroll, PremiumTable, calcEmploymentInsuranceYen } from "@/app/_lib/payroll/engine";
@@ -1675,11 +1676,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
 
               <label style={labelWrap}>
                 <span style={labelText}>対象月（YYYY-MM）</span>
-                <input
-                  value={ym}
-                  onChange={(e) => setYm(e.target.value)}
-                  style={inputStyle}
-                />
+                <MonthInput value={ym} onCommit={setYm} style={inputStyle} />
               </label>
 
               <label style={labelWrap}>
@@ -1921,19 +1918,6 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
               </button>
 
               <button
-                style={{ ...primaryBtn, background: "#6366f1", marginTop: 8 }}
-                type="button"
-                onClick={() => {
-                  if (!selectedEmp) return alert("従業員を選択してください");
-                  const url = `/api/payroll/export-ledger?employeeId=${selectedEmp.id}&year=${taxYear}`;
-                  window.location.href = url;
-                }}
-                disabled={!selectedEmp}
-              >
-                📊 賃金台帳Excel出力（年次）
-              </button>
-
-              <button
                 style={{ ...primaryBtn, background: "#059669", marginTop: 8 }}
                 type="button"
                 onClick={async () => {
@@ -1945,7 +1929,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
                       body: JSON.stringify({ employeeId: selectedEmp.id, year: taxYear }),
                     });
                     if (!res.ok) {
-                      const json = await res.json();
+                      const json = await res.json().catch(() => ({}));
                       if (json.error === "template_not_found") {
                         alert(
                           "テンプレートファイルが見つかりません。\napp/_templates/wage-ledger-template.xlsx を配置してください。"
@@ -1955,14 +1939,11 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
                       }
                       return;
                     }
-
                     const blob = await res.blob();
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
                     a.href = url;
-
-                    a.download = `賃金台帳テンプレ_${taxYear}年_${selectedEmp.name}.xlsx`;
-
+                    a.download = `賃金台帳_${taxYear}年_${selectedEmp.name}.xlsx`;
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
@@ -1973,12 +1954,8 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
                 }}
                 disabled={!selectedEmp}
               >
-                📄 テンプレ版Excel出力
+                📊 賃金台帳Excel出力（年次・個人）
               </button>
-
-              <div style={{ fontSize: 12, color: "#666", marginTop: 6, lineHeight: 1.4 }}>
-                ※社労士提出用テンプレートに給与データを流し込んで出力します。
-              </div>
 
               <button
                 style={{ ...primaryBtn, background: "#7c3aed", marginTop: 8 }}
@@ -2001,7 +1978,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
                     a.href = url;
-                    a.download = `賃金台帳テンプレ_${taxYear}年_全社員.xlsx`;
+                    a.download = `賃金台帳_${taxYear}年_全社員.xlsx`;
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
@@ -2012,7 +1989,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=...`}</pre>
                 }}
                 disabled={employees.length === 0}
               >
-                📚 全社員 年次賃金台帳（テンプレ版・社員別シート）
+                📊 賃金台帳Excel出力（年次・全社員）
               </button>
             </section>
 

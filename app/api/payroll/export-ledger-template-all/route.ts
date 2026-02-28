@@ -25,7 +25,6 @@ function normalizeDeductions(raw: any): any[] {
   if (typeof raw === "object") {
     const maybeRows = (raw as any).rows;
     if (Array.isArray(maybeRows)) return maybeRows;
-    return Object.values(raw);
   }
 
   return [];
@@ -149,65 +148,19 @@ function cloneWorksheetLayoutAndLabels(src: ExcelJS.Worksheet, dst: ExcelJS.Work
 
       const v = s.value;
       if (v === null || v === undefined) continue;
-      if (isFormulaValue(v)) continue;          // 数式禁止
-      if (typeof v === "number") continue;       // 数値は fill で入れる
+      if (typeof v === "number") continue;  // 数値は fill で入れる（テンプレの placeholder を持ち込まない）
 
-      // 文字列 or richText だけコピー（ラベル）
       if (typeof v === "string") {
         d.value = v;
       } else if (isRichText(v)) {
         d.value = deepClone(v);
+      } else if (isFormulaValue(v)) {
+        // 数式をコピー（shared formula 参照もそのまま保持 — 同じシート構造なので有効）
+        // fill 側で forceSetCell する行は上書きされる、それ以外（合計行等）は数式のまま残る
+        d.value = deepClone(v);
       }
     }
   }
-}
-
-// ========== テンプレセルダンプ（デバッグ用・INPUT_CELLS 洗い出し） ==========
-
-function dumpTemplateCells(ws: ExcelJS.Worksheet) {
-  const maxRow = Math.max(ws.rowCount, 40);
-  const maxCol = Math.max(ws.columnCount, 80); // BC列(55)超えのテンプレにも対応
-  const lines: string[] = [];
-
-  for (let r = 1; r <= maxRow; r++) {
-    for (let c = 1; c <= maxCol; c++) {
-      const cell = ws.getCell(r, c);
-      if (cell.value === null || cell.value === undefined) continue;
-
-      const addr = cell.address; // e.g. "A1"
-      const v = cell.value as any;
-      let cellType: string;
-      let preview: string;
-
-      if (typeof v === "string") {
-        cellType = "string";
-        preview = v.length > 40 ? v.slice(0, 40) + "…" : v;
-      } else if (typeof v === "number") {
-        cellType = "number";
-        preview = String(v);
-      } else if (v && typeof v === "object" && v.formula) {
-        cellType = "formula";
-        preview = v.formula.length > 60 ? v.formula.slice(0, 60) + "…" : v.formula;
-      } else if (v && typeof v === "object" && v.sharedFormula) {
-        cellType = "sharedFormula";
-        preview = v.sharedFormula.length > 60 ? v.sharedFormula.slice(0, 60) + "…" : v.sharedFormula;
-      } else if (v && typeof v === "object" && v.richText) {
-        cellType = "richText";
-        preview = v.richText.map((t: any) => t.text).join("").slice(0, 40);
-      } else if (v instanceof Date) {
-        cellType = "date";
-        preview = v.toISOString();
-      } else {
-        cellType = typeof v;
-        preview = JSON.stringify(v).slice(0, 60);
-      }
-
-      lines.push(`  ${addr.padEnd(6)} [${cellType.padEnd(14)}] ${preview}`);
-    }
-  }
-
-  console.log(`[template-dump] ${ws.name} — ${lines.length} non-empty cells (rows 1-${maxRow}, cols 1-${maxCol})`);
-  console.log(lines.join("\n"));
 }
 
 // ========== 書き込みガード ==========
@@ -503,12 +456,37 @@ function fillLedgerTemplateOnSheet(
   writeMonthly(ws, R.baseSalary, monthStarts, monthly.map(v => v.baseSalary), { blankIfZero: true });
   writeMonthly(ws, R.specialAllowance, monthStarts, monthly.map(v => v.specialAllowance), { blankIfZero: true });
   // row16 (夜勤) は動的allowanceAreaに移したため固定書き込みなし
-  // row15 のラベルを「固定残業代」に更新（テンプレの「特別手当」を上書き）
-  safeSetCell(ws, R.specialAllowance, INPUT_CELLS.allowanceArea.labelCol, "固定残業代");
 
-  // 手当（可変）: 年間の手当ラベルを収集してテンプレ枠に流し込む
+  // 固定ラベル行(14:基本給, 15:特別手当)を
+  // A-H(8列) → A独立 + B-G結合 に変換して控除ラベルと同じ幅・配置にする
   {
-    const { startRow, endRow, labelCol } = INPUT_CELLS.allowanceArea;
+    const fixedLabelFont = { charset: 128, size: 11, name: "ＭＳ 明朝" } as const;
+    const colARef14 = ws.getCell(R.healthIns, 1);
+    const colAFill14 = colARef14.fill as ExcelJS.Fill | undefined;
+    const colABorder14 = colARef14.border as ExcelJS.Borders | undefined;
+    for (const fixedRow of [R.baseSalary, R.specialAllowance]) {
+      let cur = ws.getCell(fixedRow, 1);
+      if (cur.isMerged) { const m = (cur as any).master as ExcelJS.Cell | undefined; if (m) cur = m; }
+      const curVal = cur.value;
+      try { ws.unMergeCells(fixedRow, 1, fixedRow, 8); } catch { /* ignore */ }
+      const colA = ws.getCell(fixedRow, 1);
+      colA.value = null;
+      if (colAFill14) colA.fill = colAFill14;
+      if (colABorder14) colA.border = colABorder14;
+      ws.mergeCells(fixedRow, 2, fixedRow, 7);
+      const labelCell = ws.getCell(fixedRow, 2);
+      // row15 は「特別手当」→「固定残業代」にラベルを差し替え
+      labelCell.value = fixedRow === R.specialAllowance ? "固定残業代" : curVal;
+      labelCell.font = { ...fixedLabelFont };
+      labelCell.alignment = { horizontal: "distributed", vertical: "middle", wrapText: false };
+      // 左右罫線を除去して top/bottom のみ（row26-27 と同じスタイル）
+      labelCell.border = { top: { style: "dashed" }, bottom: { style: "dashed" } };
+    }
+  }
+
+  // 手当（可変・6行枠）: 枠内でラベルと金額を書く。endRow 以降は絶対に触らない
+  {
+    const { startRow, endRow } = INPUT_CELLS.allowanceArea;
     const maxRows = endRow - startRow + 1;
     const labels = Array.from(
       new Set(monthly.flatMap(m => m.allowanceItems.map(a => a.label)))
@@ -519,24 +497,56 @@ function fillLedgerTemplateOnSheet(
     const limited = labels.slice(0, displayRows);
     const overflow = hasOverflow ? labels.slice(displayRows) : [];
 
+    // テンプレ構造:
+    //   Row 14-21: A-H(8列)結合 → alignment left (手当エリアのデフォルト)
+    //   Row 26-29: A列独立 + B-G(6列)結合 → alignment distributed (控除ラベル)
+    // → row17-21 も A-H を解除し B-G 結合に変換して、控除ラベルと同一構造にする
+    const labelFont = { charset: 128, size: 11, name: "ＭＳ 明朝" } as const;
+    // row26 col A のスタイル（独立セル）をテンプレから取得しておく
+    const colARef = ws.getCell(R.healthIns, 1);
+    const colAFill = colARef.fill as ExcelJS.Fill | undefined;
+    const colABorder = colARef.border as ExcelJS.Borders | undefined;
+
+    function writeLabelCell(row: number, label: string | null) {
+      // A-H 結合を解除（既に解除済みでも無害）
+      try { ws.unMergeCells(row, 1, row, 8); } catch { /* ignore */ }
+      // 3) col A を控除ラベル行(row26)と同じ独立スタイルに揃える
+      const colA = ws.getCell(row, 1);
+      colA.value = null;
+      if (colAFill) colA.fill = colAFill;
+      if (colABorder) colA.border = colABorder;
+      // 4) B-G を結合（控除ラベルと同じ幅）
+      ws.mergeCells(row, 2, row, 7);
+      // 5) ラベルを書き込み、左右罫線を除去して top/bottom のみ（row26-27 と同じスタイル）
+      const cell = ws.getCell(row, 2);
+      cell.value = label;
+      cell.font = { ...labelFont };
+      cell.alignment = { horizontal: "distributed", vertical: "middle", wrapText: false };
+      cell.border = { top: { style: "dashed" }, bottom: { style: "dashed" } };
+    }
+
+    // 枠を完全クリア（ラベル列＋全月の金額列）
     // ⚠ テンプレにformulaがある行(row16:夜勤など)もforceで上書きしてクリア
     for (let i = 0; i < maxRows; i++) {
       const r = startRow + i;
-      safeSetCell(ws, r, labelCol, null);
-      for (const col of monthStarts) { if (col) forceSetCell(ws, r, col, null); }
+      writeLabelCell(r, null);
+      for (const col of monthStarts) {
+        if (col) forceSetCell(ws, r, col, null);
+      }
     }
 
-    // formula上書きのためforce:true
+    // ラベルを行に割り当てて金額を流す（formula上書きのためforce:true）
     limited.forEach((label, i) => {
       const r = startRow + i;
-      safeSetCell(ws, r, labelCol, label);
+      writeLabelCell(r, label);
       const values = monthly.map(m => m.allowanceItems.find(a => a.label === label)?.yen ?? null);
       writeMonthly(ws, r, monthStarts, values, { blankIfZero: true, force: true });
     });
 
+    // 溢れた分は最終行に合算
     if (overflow.length > 0) {
       const r = endRow;
-      safeSetCell(ws, r, labelCol, "その他（合算）");
+      writeLabelCell(r, "その他（合算）");
       const values = monthly.map(m => {
         const sum = m.allowanceItems
           .filter(a => overflow.includes(a.label))
@@ -616,18 +626,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no_employees" }, { status: 400 });
     }
 
-    // テンプレート読み込み（1箇所に固定）
+    // テンプレートをバッファで一度だけ読む（Windows/Vercel 環境でも確実）
     const templatePath = path.join(process.cwd(), "app", "_templates", "wage-ledger-template.xlsx");
+    let templateBuffer: Buffer;
     try {
-      await fs.access(templatePath);
+      templateBuffer = await fs.readFile(templatePath);
     } catch {
       return NextResponse.json({ error: "template_not_found", path: templatePath }, { status: 400 });
     }
-    console.log("[ledger-template] using template:", templatePath);
+    console.log("[ledger-template] using template:", templatePath, "size=", templateBuffer.byteLength);
 
     // ① 複製元（未加工テンプレ）— fill で汚さない
     const baseWb = new ExcelJS.Workbook();
-    await baseWb.xlsx.readFile(templatePath);
+    await baseWb.xlsx.load(templateBuffer as any);
     const baseWs = baseWb.worksheets[0];
     if (!baseWs) {
       return NextResponse.json({ error: "base_template_sheet_not_found" }, { status: 500 });
@@ -635,40 +646,12 @@ export async function POST(req: Request) {
     // 9月列がテンプレに無い場合は動的挿入（cloneWorksheetLayoutAndLabels の複製元なので先に処理）
     ensureSeptemberColumn(baseWs);
 
-    // ② 出力用（ここにシートを増やして返す）
+    // ② 出力用（空ワークブック — 全社員を同じ clone → fill で均一処理）
     const outWb = new ExcelJS.Workbook();
-    await outWb.xlsx.readFile(templatePath);
-    const templateWs = outWb.worksheets[0];
-    if (!templateWs) {
-      return NextResponse.json({ error: "template_sheet_not_found" }, { status: 500 });
-    }
-    // 9月列挿入（1人目のシート用）
-    ensureSeptemberColumn(templateWs);
-    // デバッグ：テンプレの全セルをダンプ（INPUT_CELLS 辞書の洗い出し用）
-    dumpTemplateCells(templateWs);
 
-    console.log("[ledger-template] views:", templateWs.views);
-    console.log("[ledger-template] pageSetup:", templateWs.pageSetup);
-
-    // 1人目：テンプレシートをそのまま使う（リネーム）
-    const firstEmp = employees[0];
-    templateWs.name = safeSheetName(`${year}_${firstEmp?.name ?? "社員"}`);
-
-    {
-      const monthly = await getMonthlyPayrollData({ supabase, employeeId: firstEmp.id, year });
-      fillLedgerTemplateOnSheet(templateWs, monthly, year, {
-        name: firstEmp?.name ?? "不明",
-        birth: firstEmp?.birth_date ?? "",
-        hire: firstEmp?.hire_date ?? firstEmp?.effective_from ?? "",
-        gender: firstEmp?.gender ?? "",
-        company: firstEmp?.department ?? firstEmp?.company ?? "",
-      });
-    }
-
-    // 2人目以降：未加工 baseWs から複製して埋める
-    for (let i = 1; i < employees.length; i++) {
-      const emp = employees[i];
-      const ws = outWb.addWorksheet(safeSheetName(`${year}_${emp?.name ?? `社員${i + 1}`}`));
+    // 全社員を for...of で逐次処理（テンプレ版と同じ複製・流し込みを人数分繰り返す）
+    for (const emp of employees) {
+      const ws = outWb.addWorksheet(safeSheetName(`${year}_${emp?.name ?? "社員"}`));
       cloneWorksheetLayoutAndLabels(baseWs, ws);
 
       const monthly = await getMonthlyPayrollData({ supabase, employeeId: emp.id, year });

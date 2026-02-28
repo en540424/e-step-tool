@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { MonthInput } from "@/app/_components/MonthInput";
 import Link from "next/link";
 import { calcLeaveAllowance } from "@/app/_lib/leave-allowance/engine";
 
@@ -204,7 +205,7 @@ export default function LeaveAllowancePage() {
        　 <h2 style={h2}>対象</h2>
        　 <label style={labelWrap}>
           <span style={labelText}>休業が発生した対象月（YYYY-MM）</span>
-          <input value={targetYm} onChange={(e) => setTargetYm(e.target.value)} style={inputStyle} />
+          <MonthInput value={targetYm} onCommit={setTargetYm} style={inputStyle} />
           <div style={help}>
             この月から「直近3カ月」を自動で作ります（{m1}, {m2}, {m3}）。
           </div>
