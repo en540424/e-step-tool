@@ -195,8 +195,8 @@ function safeSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: any
     if (master) cell = master;
   }
 
-  // 数式セルは書き込みスキップ（止めない）
-  if (isFormulaCell(cell)) {
+  // 数式セルは書き込みスキップ（isFormulaCell + cell.formula の二重ガード）
+  if (isFormulaCell(cell) || !!cell.formula) {
     return;
   }
 
@@ -234,8 +234,9 @@ function safeSetByAddress(ws: ExcelJS.Worksheet, addr: string, value: any) {
     if (master) cell = master;
   }
 
-  if (isFormulaCell(cell)) {
-    return; // 数式セルはスキップ
+  // 数式セルはスキップ（isFormulaCell + cell.formula の二重ガード）
+  if (isFormulaCell(cell) || !!cell.formula) {
+    return;
   }
 
   cell.value = value;
@@ -662,6 +663,10 @@ export async function POST(req: Request) {
         gender: emp?.gender ?? "",
         company: emp?.department ?? emp?.company ?? "",
       });
+
+      // 診断ログ：差引支給金額（BE37）が数式のまま残っているか確認
+      const dbgCell = ws.getCell("BE37");
+      console.log(`[debug] ${emp?.name} BE37:`, JSON.stringify(dbgCell.value));
     }
 
     // 数式再計算を強制（Excelで開いたとき自動再計算）
