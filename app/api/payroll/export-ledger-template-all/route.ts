@@ -187,6 +187,9 @@ function isFormulaCell(cell: ExcelJS.Cell): boolean {
 
 /** 安全書き込み（merged child → master に寄せる、数式はスキップ） */
 function safeSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: any) {
+  // 空値・0 は書かない（テンプレセルを汚さない）
+  if (value === undefined || value === null || value === "" || value === 0) return;
+
   let cell = ws.getCell(row, col);
 
   // merged child → master に寄せる（throwしない）
@@ -197,6 +200,7 @@ function safeSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: any
 
   // 数式セルは書き込みスキップ（isFormulaCell + cell.formula の二重ガード）
   if (isFormulaCell(cell) || !!cell.formula) {
+    console.warn(`[safeSetCell] SKIP formula R${cell.row}C${cell.col} formula="${(cell.value as any)?.formula ?? (cell as any)._model?.formula}" tried=${JSON.stringify(value)}`);
     return;
   }
 
@@ -209,6 +213,10 @@ function forceSetCell(ws: ExcelJS.Worksheet, row: number, col: number, value: an
   if (cell.isMerged) {
     const master = (cell as any).master as ExcelJS.Cell | undefined;
     if (master) cell = master;
+  }
+  // 数式セルを上書きする場合はログ（犯人捜し用）
+  if (isFormulaCell(cell) || !!cell.formula) {
+    console.warn(`[forceSetCell] OVERWRITE FORMULA ${cell.address} formula="${(cell.value as any)?.formula ?? cell.formula ?? ""}" with=${JSON.stringify(value)}`);
   }
   // ExcelJS の内部モデルから formula/sharedFormula を削除する
   // （cell.value = x だけでは sharedFormula 参照が残り、Excel 開時の再計算で値が上書きされる）
@@ -236,6 +244,7 @@ function safeSetByAddress(ws: ExcelJS.Worksheet, addr: string, value: any) {
 
   // 数式セルはスキップ（isFormulaCell + cell.formula の二重ガード）
   if (isFormulaCell(cell) || !!cell.formula) {
+    console.warn(`[safeSetByAddress] SKIP formula ${addr}(→${cell.address}) formula="${(cell.value as any)?.formula ?? (cell as any)._model?.formula}" tried=${JSON.stringify(value)}`);
     return;
   }
 
@@ -425,6 +434,31 @@ const INPUT_CELLS = {
     labelCol: 1,
   },
 };
+
+// ========== 共有数式展開（ExcelがsharedFormulaを誤認識するのを防ぐ） ==========
+
+function expandSharedFormulas(ws: ExcelJS.Worksheet) {
+  let changed = 0;
+
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      const v: any = cell.value;
+
+      // sharedFormula / shareType などを含む "共有数式オブジェクト" を通常の {formula} に戻す
+      if (v && typeof v === "object") {
+        const f = v.formula || v.sharedFormula;
+        const isShared = v.shareType === "shared" || !!v.sharedFormula || !!v.ref;
+
+        if (f && isShared) {
+          cell.value = { formula: f }; // shareType/ref/result を捨てて "通常数式" にする
+          changed++;
+        }
+      }
+    });
+  });
+
+  console.log(`[expandSharedFormulas] ws="${ws.name}" changed=${changed}`);
+}
 
 // ========== テンプレ流し込み（座標固定 + safeSet ガード） ==========
 
@@ -644,11 +678,22 @@ export async function POST(req: Request) {
     if (!baseWs) {
       return NextResponse.json({ error: "base_template_sheet_not_found" }, { status: 500 });
     }
+    // テンプレ識別ログ（ローカル/Vercelで同じファイルを読んでいるか確認）
+    {
+      const markerA2 = baseWs.getCell("A2");
+      const markerA1 = baseWs.getCell("A1");
+      console.log("[template] sheet=", baseWs.name, "rows=", baseWs.rowCount, "cols=", baseWs.columnCount);
+      console.log("[template] A1=", JSON.stringify(markerA1.value), "A2=", JSON.stringify(markerA2.value));
+    }
     // 9月列がテンプレに無い場合は動的挿入（cloneWorksheetLayoutAndLabels の複製元なので先に処理）
     ensureSeptemberColumn(baseWs);
 
     // ② 出力用（空ワークブック — 全社員を同じ clone → fill で均一処理）
     const outWb = new ExcelJS.Workbook();
+    // 全再計算強制（baseWb ではなく outWb に付けるのが必須）
+    outWb.calcProperties.fullCalcOnLoad = true;
+    (outWb.calcProperties as any).calcCompleted = false;
+    (outWb.calcProperties as any).calcOnSave = true;
 
     // 全社員を for...of で逐次処理（テンプレ版と同じ複製・流し込みを人数分繰り返す）
     for (const emp of employees) {
@@ -664,13 +709,18 @@ export async function POST(req: Request) {
         company: emp?.department ?? emp?.company ?? "",
       });
 
-      // 診断ログ：差引支給金額（BE37）が数式のまま残っているか確認
-      const dbgCell = ws.getCell("BE37");
-      console.log(`[debug] ${emp?.name} BE37:`, JSON.stringify(dbgCell.value));
+      // 共有数式を通常数式に展開（Excel が sharedFormula を誤認識するのを防ぐ）
+      expandSharedFormulas(ws);
+
+      // 数式キャッシュ診断：式が生きているかを確認（value={formula:...} なら正常）
+      for (const addr of ["I23","I25","I31","I36","I37","BE23","BE25","BE31","BE36","BE37"]) {
+        const c = ws.getCell(addr);
+        console.log(`[sumcheck] ${emp?.name} ${addr} value=${JSON.stringify(c.value)} formula=${c.formula ?? ""}`);
+      }
     }
 
-    // 数式再計算を強制（Excelで開いたとき自動再計算）
-    outWb.calcProperties = { ...(outWb.calcProperties ?? {}), fullCalcOnLoad: true };
+    // 数式再計算を強制（Excelで開いたとき自動再計算）— outWb で既にセット済み、念のため保持
+    outWb.calcProperties.fullCalcOnLoad = true;
 
     const arrayBuffer = await outWb.xlsx.writeBuffer();
     const uint8 = new Uint8Array(arrayBuffer);
